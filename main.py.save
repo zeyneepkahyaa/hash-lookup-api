@@ -1,0 +1,34 @@
+import redis,requests
+from fastapi import FastApı,Request
+from sqlalchemy import create_engine, column, Integer, String, Boolean
+from sqlalchemy.orm import sessionmaker,declaratives_base
+from fastapi.templating import Jinja2Templates
+
+db_url = "postgresql://postgres:1234*@db/hash_db"
+engine = create_engie(db_url)
+SessionLocal = sessionmaker(bind=engine)
+Base = declarative_base()
+
+class hashrecord(Base):
+    id = column(Integer, primary_key=True)
+    val = column(Stirng, uique=True)
+    is_bad = column(Boolean)
+
+Base.metadata.create_all(bind=engine)
+app = FastAPI()
+tmp = Jinja2Templates(directory="templates")
+cache = redis.Redis(host='redis', decode_responses=True)
+
+
+def check_hash(h):
+    cached = cache.get(h)
+    if cached: return cached == "True"
+
+    url = f"https://www.virustotal.com/api/v3/files/{h}"
+    headers = {"x-apikey": "3146b4b87a13d1f4ae062f09dccbbafded8863ad36f771b0b268471d4d00cd0"}
+    res = requests.get(url, headres=headers)
+
+    is_bad = False 
+    if res.status_code == 200:
+       stats = res.json().get('data', {}).get('attributes',{}).get('last_analysis_stats',{})
+       is_bad = stats.get('malicious', 0) >

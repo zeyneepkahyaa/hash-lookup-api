@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Hash Lookup API - Zeynep</title>
+    <style>
+        body { font-family: sans-serif; background: #f0f2f5; display: flex; justify-content: center; padding: 50px; }
+        .card { background: white; padding: 30px; border-radius: 12px; shadow: 0 4px 6px rgba(0,0,0,0.1); width: 500px; border-top: 5px solid #007bff; }
+        input { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; }
+        button { width: 100%; padding: 12px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        #res { margin-top: 20px; padding: 15px; border-radius: 6px; display: none; }
+        .bad { background: #ffebee; color: #c62828; border: 1px solid #ef9a9a; }
+        .good { background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>🔍 Hash Analiz Sistemi</h2>
+        <p>Dosya hash değerini (MD5/SHA256) girin:</p>
+        <input type="text" id="h" placeholder="Örn: 44d88612fea8a8f36de82e1278abb02f">
+        <button onclick="sorgula()">Analiz Et</button>
+        <div id="res"></div>
+    </div>
+
+    <script>
+        async function sorgula() {
+            const h = document.getElementById('h').value;
+            const resDiv = document.getElementById('res');
+            resDiv.style.display = 'block';
+            resDiv.innerHTML = "Sorgulanıyor...";
+            
+            const response = await fetch('/scan/' + h);
+            const data = await response.json();
+            
+            if(data.malicious) {
+                resDiv.className = 'bad';
+                resDiv.innerHTML = "🚨 DİKKAT: Bu dosya zararlı olarak işaretlenmiş!";
+            } else {
+                resDiv.className = 'good';
+                resDiv.innerHTML = "✅ TEMİZ: Herhangi bir tehdit bulunamadı.";
+            }
+        }
+    </script>
+</body>
+</html>
