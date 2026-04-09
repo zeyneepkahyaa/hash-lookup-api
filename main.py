@@ -1,65 +1,84 @@
-import redis, requests
-from fastapi import FastAPI, Request
-from sqlalchemy import create_engine, Column, Integer, String, Boolean
-from sqlalchemy.orm import sessionmaker, declarative_base
+import os
+import requests
+import redis
+from fastapi import FastAPI, Request, Form, Depends
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import create_all_metadata, create_engine, Column, String, Integer
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
 
-# 1. Veritabanı Yapılandırması (PostgreSQL)
-# Docker iç ağında 'db' ismiyle servisler birbirini bulur.
-DB_URL = "postgresql://postgres:1234*@db/hash_db"
-engine = create_engine(DB_URL)
-SessionLocal = sessionmaker(bind=engine)
+app = FastAPI()
+templates = Jinja2Templates(directory="templates")
+
+# --- 1. SQLALCHEMY VERİTABANI AYARLARI ---
+# Docker'daki 'db' isimli servise bağlaniyoruz
+SQLALCHEMY_DATABASE_URL = "postgresql://user:password@db/hash_db"
+engine = create_engine(SQLALCHEMY_DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# Veri Modeli: Hash sonuçlarını kalıcı olarak saklar
+# Veritabanı Tablo Modelimiz
 class HashRecord(Base):
-    __tablename__ = "hashes"
-    id = Column(Integer, primary_key=True)
-    val = Column(String, unique=True)
-    is_bad = Column(Boolean)
+    __tablename__ = "analiz_kayitlari"
+    id = Column(Integer, primary_key=True, index=True)
+    hash_value = Column(String, unique=True, index=True)
+    result = Column(String)
 
+# Tabloyu otomatik olustur (Eger yoksa)
 Base.metadata.create_all(bind=engine)
 
-# 2. Uygulama ve Cache (Redis) Ayarları
-app = FastAPI()
-tmp = Jinja2Templates(directory="templates")
-# Önemli: Host mutlaka 'redis' servis ismi olmalı!
-cache = redis.Redis(host='redis', decode_responses=True)
-
-# 3. Teknik Çekirdek: Hibrit Sorgulama Mantığı (Redis + VirusTotal)
-def check_hash(h):
-    # Katman 1: Redis Önbellek (Milisaniyeler içinde yanıt)
-    cached = cache.get(h)
-    if cached: return cached == "True"
-
-    # Katman 2: VirusTotal API (Dış kaynak sorgusu)
-    url = f"https://www.virustotal.com/api/v3/files/{h}"
-    headers = {"x-apikey": "3146b4b87a13d1f4ae062f09dccbbafded8863ad367f771b0b268471d4d00cd0"}
-    res = requests.get(url, headers=headers)
-    
-    is_bad = False
-    if res.status_code == 200:
-        stats = res.json().get('data', {}).get('attributes', {}).get('last_analysis_stats', {})
-        is_bad = stats.get('malicious', 0) > 0
-    
-    # Performans için sonucu 24 saatliğine Redis'e işle
-    cache.setex(h, 86400, str(is_bad))
-    return is_bad
-
-# 4. API Uç Noktaları (Endpoints)
-@app.get("/")
-def home(request: Request):
-    return tmp.TemplateResponse("index.html", {"request": request})
-
-@app.get("/scan/{h}")
-def scan(h: str):
+# Veritabanı oturumu yönetimi
+def get_db():
     db = SessionLocal()
-    # Veritabanı Kontrolü: Aynı hash daha önce taranmış mı?
-    item = db.query(HashRecord).filter(HashRecord.val == h).first()
-    if item: return {"status": "exists", "malicious": item.is_bad}
+    try:
+        yield db
+    finally:
+        db.close()
 
-    # Yeni tarama yap ve her iki veritabanına da (PG + Redis) kaydet
-    bad = check_hash(h)
-    new_item = HashRecord(val=h, is_bad=bad)
-    db.add(new_item); db.commit()
-    return {"status": "new", "malicious": bad}
+# --- 2. REDIS VE DIŞ SERVİS AYARLARI ---
+redis_client = redis.StrictRedis(host='redis', port=6379, db=0, decode_responses=True)
+
+def fetch_from_virustotal(hash_value: str):
+    api_key = "KENDI_API_ANAHTARINI_BURAYA_YAZ"
+    url = f"https://www.virustotal.com/api/v3/files/{hash_value}"
+    headers = {"x-apikey": api_key}
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            stats = data['data']['attributes']['last_analysis_stats']
+            return f"Zararli: {stats['malicious']}, Güvenli: {stats['undetected']}"
+        return "Hash bulunamadi."
+    except:
+        return "Bağlantı hatası."
+
+# --- 3. ANA UÇ NOKTALAR ---
+
+@app.get("/")
+async def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+@app.post("/analyze")
+async def analyze(request: Request, hash_input: str = Form(...), db: Session = Depends(get_db)):
+    # Önce Redis'e bak (Hız için)
+    cached = redis_client.get(hash_input)
+    if cached:
+        return templates.TemplateResponse("index.html", {"request": request, "result": cached, "hash": hash_input})
+
+    # Redis'te yoksa, önce Veritabanına (Postgres) bak (Kalıcılık için)
+    db_record = db.query(HashRecord).filter(HashRecord.hash_value == hash_input).first()
+    if db_record:
+        # Veritabanında bulduk, Redis'e de atalim ki bir dahaki sefere daha hizli olsun
+        redis_client.setex(hash_input, 86400, db_record.result)
+        return templates.TemplateResponse("index.html", {"request": request, "result": db_record.result, "hash": hash_input})
+
+    # Hiçbir yerde yoksa API'ye git
+    result = fetch_from_virustotal(hash_input)
+    
+    # Yeni sonucu hem Veritabanına hem Redis'e kaydet
+    new_record = HashRecord(hash_value=hash_input, result=result)
+    db.add(new_record)
+    db.commit()
+    redis_client.setex(hash_input, 86400, result)
+
+    return templates.TemplateResponse("index.html", {"request": request, "result": result, "hash": hash_input})

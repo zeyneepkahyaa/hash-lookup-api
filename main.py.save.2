@@ -1,0 +1,76 @@
+import requests
+import redis
+from fastapi import FastAPI, Request, Form
+from fastapi.templating import Jinja2Templates
+from fastapi.responses import HTMLResponse
+
+app = FastAPI()
+templates = Jinja2Templates(directory="templates")
+
+# --- BAĞLANTI AYARLARI ---
+# Docker konteynerleri birbirini isimleriyle (db, redis) tanır.
+# Redis'e bağlanırken host adını 'redis' olarak veriyoruz.
+try:
+    redis_client = redis.StrictRedis(
+        host='redis', 
+        port=6379, 
+        db=0, 
+        decode_responses=True
+    )
+except Exception as e:
+    print(f"Redis baglanti hatasi: {e}")
+
+# --- ANALİZ MOTORU ---
+
+def fetch_from_virustotal(hash_value: str):
+    """
+    Bu fonksiyon hash degerini VirusTotal API üzerinden sorgular.
+    Daha profesyonel durmasi için asil analizi burada yapiyoruz.
+    """
+    # Buraya kendi API key'ini eklemelisin
+    api_key = "KENDI_API_ANAHTARINI_BURAYA_YAZ"
+    url = f"https://www.virustotal.com/api/v3/files/{hash_value}"
+    headers = {"x-apikey": api_key}
+    
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            # Analiz özetini (zararli sayisi gibi) döndürüyoruz
+            stats = data['data']['attributes']['last_analysis_stats']
+            return f"Zararli: {stats['malicious']}, Güvenli: {stats['undetected']}"
+        return "Hash bulunamadi veya API hatasi."
+    except:
+        return "Baglanti sirasinda bir hata olustu."
+
+# --- API UÇ NOKTALARI (ENDPOINTS) ---
+
+@app.get("/", response__lass=HTMLResponse)
+async def home_page(request: Request):
+    # Kullaniciyi karsilayan ilk ana sayfa
+    return templates.TemplateResponse("index.html", {"request": request})
+
+@app.post("/analyze")
+async def analyze_hash(request: Request, hash_input: str = Form(...)):
+    """
+    Hash analizinin kalbi burasi. 
+    Önce Redis (hizli hafiza) kontrol edilir, yoksa API'ye gidilir.
+    """
+    # 1. Adim: Önbellekte (Redis) bu hash var mi?
+    cached_result = redis_client.get(hash_input)
+    
+    if cached_result:
+        # Varsa, sonucu  "Hafizadan" döndürüyoruz
+        final_result = f"{cached_result} (Önbellekten Hizli Yanit)"
+    else:
+        # 2. Adim: Önbellekte yoksa API'den sorguluyoruz
+        api_result = fetch_from_virustotal(hash_input)
+        # 3. Adim: Bir sonraki sefer için Redis'e 24 saatligine kaydediyoruz
+        redis_client.setex(hash_input, 86400, api_result)
+        final_result = api_result
+
+    return templates.TemplateResponse("index.html", {
+        "request": request, 
+        "result": final_result,
+        "hash": hash_input
+    })
